@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "min_supported": "1.0.0",
+  "rules": [
+    {"id": "eng-read", "departments": ["engineering"], "actions": ["read"], "min_level": 1, "description": "工程部门只读"},
+    {"id": "legal-read", "departments": ["legal"], "actions": ["read"], "min_level": 1, "description": "法务只读(v2新增)"}
+  ],
+  "field_modes": {
+    "1": {"read": "mask"},
+    "2": {"read": "tokenize"}
+  }
+}

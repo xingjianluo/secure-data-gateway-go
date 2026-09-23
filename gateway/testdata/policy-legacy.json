@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "rules": [
+    {"id": "eng-read", "departments": ["engineering"], "actions": ["read"], "min_level": 1}
+  ]
+}

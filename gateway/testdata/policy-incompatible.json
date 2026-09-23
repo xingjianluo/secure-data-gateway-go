@@ -1,0 +1,7 @@
+{
+  "version": "3.0.0",
+  "min_supported": "2.0.0",
+  "rules": [
+    {"id": "eng-read", "departments": ["engineering"], "actions": ["read"], "min_level": 1}
+  ]
+}
