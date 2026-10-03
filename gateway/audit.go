@@ -23,7 +23,9 @@ type Logger struct {
 func NewLogger(out io.Writer) *Logger { return &Logger{out: out} }
 
 // Log 记录一次包含输入与判定依据的审计结论，并返回落库记录。
-func (l *Logger) Log(req AccessRequest, d Decision, outputFields, droppedFields []string) AuditRecord {
+// sub/known 为判定时解析到的主体快照，data 为当时参与字段处理的数据
+// （均深拷贝留存），使事后仅凭该记录即可按当时版本完整复现。
+func (l *Logger) Log(req AccessRequest, sub Subject, known bool, data map[string]any, d Decision, outputFields, droppedFields []string) AuditRecord {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -32,6 +34,9 @@ func (l *Logger) Log(req AccessRequest, d Decision, outputFields, droppedFields 
 		Seq:           l.seq,
 		Time:          time.Now().UTC(),
 		Request:       cloneRequest(req),
+		Subject:       sub,
+		SubjectKnown:  known,
+		Data:          copyData(data),
 		Decision:      d,
 		OutputFields:  append([]string(nil), outputFields...),
 		DroppedFields: append([]string(nil), droppedFields...),

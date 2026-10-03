@@ -72,5 +72,36 @@ func main() {
 		try("热更新后 carol 再读", "carol", gateway.ActionRead)
 	}
 
+	fmt.Println("\n===== 历史追溯：按当时生效的版本复现 v1 时期的访问 =====")
+	// 本地复现入口：拿着审计记录即可按当时版本复查，无需改代码。
+	for _, rec := range gw.Audit().Records() {
+		if rec.Decision.PolicyVersion != "1.0.0" {
+			continue
+		}
+		res, err := gw.Replay(rec)
+		if err != nil {
+			fmt.Printf("seq=%d 复现失败: %v\n", rec.Seq, err)
+			continue
+		}
+		fmt.Printf("seq=%d subject=%s 版本=%s 复现 allowed=%t reason=%q 与原始一致=%t\n",
+			rec.Seq, rec.Request.SubjectID, res.Version,
+			res.Decision.Allowed, res.Decision.Reason, res.Consistent)
+	}
+
+	fmt.Println("\n===== 批量复现对账（输出按审计序号稳定排序） =====")
+	for _, res := range gw.ReplayBatch(gw.Audit().Records()) {
+		fmt.Printf("seq=%d 版本=%q allowed=%t reason=%q 一致=%t 差异=%v\n",
+			res.Seq, res.Version, res.Decision.Allowed, res.Decision.Reason,
+			res.Consistent, res.Mismatches)
+	}
+
+	fmt.Println("\n===== 版本淘汰：收紧保留上限后复现已淘汰版本 =====")
+	gw.PolicyStore().SetRetention(0) // 只保留当前版本
+	fmt.Println("可追溯版本:", gw.PolicyStore().Versions())
+	v1rec := gw.Audit().Records()[0]
+	if _, err := gw.Replay(v1rec); err != nil {
+		fmt.Println("复现已淘汰版本得到明确反馈（不会拿当前版本顶包）:", err)
+	}
+
 	fmt.Printf("\n审计记录总数: %d\n", gw.Audit().Len())
 }

@@ -150,8 +150,8 @@ func TestHistoricalDecisionReproducible(t *testing.T) {
 	history := e.Evaluate(v1, carol, reqCarol)
 	t.Logf("历史判定输入: subject=carol(legal) policy=1.0.0; 依据=%v; 结论 allowed=%t reason=%q",
 		history.MatchedRules, history.Allowed, history.Reason)
-	if history.Allowed || history.Reason != DenyPolicyNotFound || history.PolicyVersion != "1.0.0" {
-		t.Fatalf("v1 历史结论应为 policy_not_found, got %+v", history)
+	if history.Allowed || history.Reason != DenyNoRuleMatch || history.PolicyVersion != "1.0.0" {
+		t.Fatalf("v1 历史结论应为 no_rule_match, got %+v", history)
 	}
 
 	// 热更新到 v2：legal 部门获得读权限。

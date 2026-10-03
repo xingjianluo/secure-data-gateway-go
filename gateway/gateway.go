@@ -56,8 +56,9 @@ func (g *Gateway) Access(req AccessRequest) (map[string]any, Decision, error) {
 	rec, ok := g.ds.Get(req.Resource.ID)
 	if !ok {
 		// 资源不存在也经过审计：输入与结论均可追溯。
-		d := Decision{Allowed: false, Reason: DenyPolicyNotFound, EvaluatedAt: nowUTC()}
-		g.audit.Log(req, d, nil, nil)
+		// 与“无可用策略”区分开，拒绝归属不混淆。
+		d := Decision{Allowed: false, Reason: DenyResourceNotFound, EvaluatedAt: nowUTC()}
+		g.audit.Log(req, Subject{}, false, nil, d, nil, nil)
 		return nil, d, ErrResourceMissing
 	}
 	res := req.Resource
@@ -82,7 +83,7 @@ func (g *Gateway) process(req AccessRequest, data map[string]any) (map[string]an
 			Reason:      DenyUnknownSubject,
 			EvaluatedAt: nowUTC(),
 		}
-		g.audit.Log(req, d, nil, nil)
+		g.audit.Log(req, Subject{}, false, nil, d, nil, nil)
 		return nil, d, ErrUnknownSubject
 	}
 
@@ -92,7 +93,7 @@ func (g *Gateway) process(req AccessRequest, data map[string]any) (map[string]an
 	// 3) 判定（纯函数，结论可复现）。
 	d := g.engine.Evaluate(p, sub, req)
 	if !d.Allowed {
-		g.audit.Log(req, d, nil, nil)
+		g.audit.Log(req, sub, true, data, d, nil, nil)
 		return nil, d, ErrAccessDenied
 	}
 
@@ -100,7 +101,7 @@ func (g *Gateway) process(req AccessRequest, data map[string]any) (map[string]an
 	out, kept, dropped := g.masker.Project(p, sub, req.Action, data, req.Resource.Fields)
 
 	// 5) 审计：输入、依据、实际输出字段与剔除字段全部留痕。
-	g.audit.Log(req, d, kept, dropped)
+	g.audit.Log(req, sub, true, data, d, kept, dropped)
 	return out, d, nil
 }
 

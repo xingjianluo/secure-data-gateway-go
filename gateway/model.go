@@ -66,7 +66,9 @@ type DenyReason string
 const (
 	DenyNone              DenyReason = ""                   // 允许
 	DenyUnknownSubject    DenyReason = "unknown_subject"    // 未知主体
-	DenyPolicyNotFound    DenyReason = "policy_not_found"   // 匹配不到任何策略
+	DenyResourceNotFound  DenyReason = "resource_not_found" // 资源不存在
+	DenyPolicyNotFound    DenyReason = "policy_not_found"   // 当前没有任何可用策略
+	DenyNoRuleMatch       DenyReason = "no_rule_match"      // 主体存在但没有任何规则覆盖
 	DenyLevelInsufficient DenyReason = "level_insufficient" // 主体敏感级别不足
 	DenyActionDenied      DenyReason = "action_denied"      // 操作类型被策略拒绝
 )
@@ -106,11 +108,30 @@ type PolicySet struct {
 }
 
 // AuditRecord 为一条可复现的审计记录，包含输入与判定依据。
+// Data 留存当时参与字段处理的数据快照（深拷贝），
+// 使事后仅凭该记录即可按当时版本完整复现判定与字段处理。
 type AuditRecord struct {
 	Seq           int64
 	Time          time.Time
 	Request       AccessRequest
+	Subject       Subject        // 判定时解析到的主体快照（复现不依赖目录后续变更）
+	SubjectKnown  bool           // 主体当时是否存在于目录中
+	Data          map[string]any // 当时的数据快照（深拷贝，只读）
 	Decision      Decision
 	OutputFields  []string // 实际返回的字段
 	DroppedFields []string // 被整体剔除的字段
+}
+
+// ReplayResult 为一次按版本复现的结论：
+// 复现出的判定/字段处理结果，以及与原始审计记录的逐项比对。
+type ReplayResult struct {
+	Seq        int64          // 原始审计记录序号
+	Version    string         // 实际用于复现的策略版本
+	Decision   Decision       // 复现判定结论
+	Output     map[string]any // 复现后的字段投影输出
+	KeptFields []string       // 复现保留字段（字典序）
+	Dropped    []string       // 复现剔除字段（字典序）
+	Consistent bool           // 是否与原始记录逐项一致
+	Mismatches []string       // 不一致项说明（为空即一致）
+	Err        error          // 复现本身失败（如版本已淘汰）；非空时其余字段无效
 }

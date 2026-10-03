@@ -15,8 +15,9 @@ func NewEngine() *Engine { return &Engine{} }
 
 // Evaluate 基于主体属性、资源敏感级别与操作类型进行判定。
 //
-// 拒绝原因严格区分：
-//   - policy_not_found：策略缺失或没有任何规则与主体属性匹配；
+// 拒绝原因严格区分、互不混淆：
+//   - policy_not_found：当前没有任何可用策略（策略缺失或规则为空）；
+//   - no_rule_match：策略可用、主体存在，但没有任何规则覆盖该主体；
 //   - action_denied：存在匹配主体的规则，但均不允许本次操作；
 //   - level_insufficient：操作被允许，但主体敏感级别低于资源要求；
 //   - unknown_subject 由网关在主体目录查询阶段给出，不进入本引擎。
@@ -50,7 +51,7 @@ func (e *Engine) Evaluate(p *Policy, sub Subject, req AccessRequest) Decision {
 	basis := describe(candidates)
 
 	if len(candidates) == 0 {
-		return base(DenyPolicyNotFound, nil)
+		return base(DenyNoRuleMatch, nil)
 	}
 	if len(actionRules) == 0 {
 		return base(DenyActionDenied, basis)

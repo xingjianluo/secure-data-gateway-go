@@ -108,7 +108,7 @@ func TestDenyReasonsAreDistinguishable(t *testing.T) {
 	}{
 		{"操作被拒(alice写)", AccessRequest{SubjectID: "alice", Action: ActionWrite, Resource: Resource{ID: "cust-1", Level: LevelInternal, Fields: customerLevels()}}, DenyActionDenied, ErrAccessDenied},
 		{"级别不足(alice读secret)", readReq("alice", "cust-secret", LevelSecret), DenyLevelInsufficient, ErrAccessDenied},
-		{"策略缺失(carol部门无规则)", readReq("carol", "cust-1", LevelInternal), DenyPolicyNotFound, ErrAccessDenied},
+		{"无规则覆盖(carol部门无规则)", readReq("carol", "cust-1", LevelInternal), DenyNoRuleMatch, ErrAccessDenied},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,10 +134,13 @@ func TestDenyReasonsAreDistinguishable(t *testing.T) {
 		})
 	}
 
-	// 三种拒绝原因互不相等，防止被静默归为同一类。
+	// 各拒绝原因互不相等，防止被静默归为同一类。
 	if DenyActionDenied == DenyLevelInsufficient ||
 		DenyActionDenied == DenyPolicyNotFound ||
+		DenyActionDenied == DenyNoRuleMatch ||
 		DenyLevelInsufficient == DenyPolicyNotFound ||
+		DenyLevelInsufficient == DenyNoRuleMatch ||
+		DenyPolicyNotFound == DenyNoRuleMatch ||
 		DenyUnknownSubject == DenyActionDenied {
 		t.Fatal("拒绝原因不得相同")
 	}
