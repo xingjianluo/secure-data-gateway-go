@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -23,7 +24,9 @@ type Logger struct {
 func NewLogger(out io.Writer) *Logger { return &Logger{out: out} }
 
 // Log 记录一次包含输入与判定依据的审计结论，并返回落库记录。
-func (l *Logger) Log(req AccessRequest, d Decision, outputFields, droppedFields []string) AuditRecord {
+// sub 为判定实际使用的主体属性快照（未知主体传 nil），随记录留存，
+// 使事后复现不依赖主体目录的当前状态。
+func (l *Logger) Log(req AccessRequest, sub *Subject, d Decision, outputFields, droppedFields []string) AuditRecord {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -35,6 +38,10 @@ func (l *Logger) Log(req AccessRequest, d Decision, outputFields, droppedFields 
 		Decision:      d,
 		OutputFields:  append([]string(nil), outputFields...),
 		DroppedFields: append([]string(nil), droppedFields...),
+	}
+	if sub != nil {
+		rec.Subject = *sub
+		rec.SubjectKnown = true
 	}
 	l.records = append(l.records, rec)
 	l.write(rec)
@@ -77,6 +84,24 @@ func (l *Logger) write(r AuditRecord) {
 		strings.Join(r.Decision.MatchedRules, "; "),
 		r.OutputFields, r.DroppedFields,
 	)
+}
+
+// SaveJSON 把当前全部审计记录以 JSON 数组写入 w，
+// 供本地命令行工具加载后按版本复查（见 cmd/replay）。
+func (l *Logger) SaveJSON(w io.Writer) error {
+	recs := l.Records()
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(recs)
+}
+
+// LoadRecordsJSON 读取由 SaveJSON 导出的审计记录。
+func LoadRecordsJSON(r io.Reader) ([]AuditRecord, error) {
+	var recs []AuditRecord
+	if err := json.NewDecoder(r).Decode(&recs); err != nil {
+		return nil, fmt.Errorf("decode audit records: %w", err)
+	}
+	return recs, nil
 }
 
 func fieldLevelList(fields map[string]Level) []string {

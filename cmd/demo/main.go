@@ -15,18 +15,10 @@ func main() {
 		gateway.Subject{ID: "bob", Department: "sales", Role: "rep", Clearance: gateway.LevelInternal},
 		gateway.Subject{ID: "carol", Department: "legal", Role: "counsel", Clearance: gateway.LevelConfidential},
 	)
-	p := &gateway.Policy{
-		Version:      "1.0.0",
-		MinSupported: "1.0.0",
-		Rules: []gateway.Rule{
-			{ID: "eng-read", Departments: []string{"engineering"}, Actions: []gateway.Action{gateway.ActionRead}, MinLevel: gateway.LevelInternal},
-			{ID: "sales-read", Departments: []string{"sales"}, Actions: []gateway.Action{gateway.ActionRead}, MinLevel: gateway.LevelPublic},
-		},
-		FieldModes: map[gateway.Level]map[gateway.Action]gateway.FieldMode{
-			gateway.LevelInternal:     {gateway.ActionRead: gateway.FieldMask},
-			gateway.LevelConfidential: {gateway.ActionRead: gateway.FieldTokenize},
-			gateway.LevelSecret:       {gateway.ActionRead: gateway.FieldDrop},
-		},
+	p, err := gateway.LoadPolicyFile("gateway/testdata/policy-v1.json")
+	if err != nil {
+		fmt.Println("加载初始策略失败:", err)
+		os.Exit(1)
 	}
 	gw := gateway.New(cat, gateway.NewStore(p), []byte("demo-token-secret"), os.Stdout)
 	ds := gateway.NewDataSource()
@@ -73,4 +65,20 @@ func main() {
 	}
 
 	fmt.Printf("\n审计记录总数: %d\n", gw.Audit().Len())
+
+	// 导出审计记录，供 cmd/replay 按版本复查对账。
+	const auditPath = "audit-demo.json"
+	f, err := os.Create(auditPath)
+	if err != nil {
+		fmt.Println("导出审计记录失败:", err)
+		return
+	}
+	defer f.Close()
+	if err := gw.Audit().SaveJSON(f); err != nil {
+		fmt.Println("导出审计记录失败:", err)
+		return
+	}
+	fmt.Printf("审计记录已导出: %s（复查: go run ./cmd/replay -audit %s "+
+		"-policies gateway/testdata/policy-v1.json,gateway/testdata/policy-v2.json）\n",
+		auditPath, auditPath)
 }

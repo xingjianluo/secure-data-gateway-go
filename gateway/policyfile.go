@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 )
 
 // ruleDTO / policyDTO 为本地 JSON 策略文件的传输结构。
@@ -121,4 +122,26 @@ func parseLevelKey(s string) (Level, error) {
 		return 0, fmt.Errorf("level key %q out of range", s)
 	}
 	return Level(n), nil
+}
+
+// LoadPolicyFilesSorted 加载多个本地策略文件并按版本号由旧到新排序返回，
+// 供命令行工具把一整段历史版本依次发布进 Store 以复现历史判定。
+func LoadPolicyFilesSorted(paths []string) ([]*Policy, error) {
+	policies := make([]*Policy, 0, len(paths))
+	for _, path := range paths {
+		p, err := LoadPolicyFile(path)
+		if err != nil {
+			return nil, err
+		}
+		policies = append(policies, p)
+	}
+	sort.Slice(policies, func(i, j int) bool {
+		vi, errI := parseSemver(policies[i].Version)
+		vj, errJ := parseSemver(policies[j].Version)
+		if errI != nil || errJ != nil {
+			return policies[i].Version < policies[j].Version
+		}
+		return cmpSemver(vi, vj) < 0
+	})
+	return policies, nil
 }

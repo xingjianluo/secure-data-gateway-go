@@ -14,12 +14,14 @@
 | `gateway/subjects.go` | 内存主体目录（模拟主体属性数据源） |
 | `gateway/policy.go` | 无状态授权判定引擎：ABAC 匹配 + 区分拒绝原因 + 记录依据 |
 | `gateway/masking.go` | 字段级投影：保留 / 脱敏 / 不可逆令牌化 / 整体剔除 |
-| `gateway/store.go` | 策略存储：原子快照、安全热更新、版本兼容校验 |
+| `gateway/store.go` | 策略存储：原子快照、安全热更新、版本兼容校验、历史版本保留与淘汰 |
 | `gateway/policyfile.go` | 本地 JSON 策略文件加载（旧版字段缺失可容忍） |
-| `gateway/audit.go` | 审计记录器：内存留存 + 实时打印输入与判定依据 |
+| `gateway/audit.go` | 审计记录器：内存留存 + 实时打印输入与判定依据 + JSON 导出 |
+| `gateway/replay.go` | 历史复现对账：按版本复现、批量对账、逐项比对、时间窗过滤 |
 | `gateway/datasource.go` | 内存数据源（读写均做深拷贝） |
 | `gateway/gateway.go` | 网关组装与两个统一入口、`ReloadPolicy` |
-| `cmd/demo/main.go` | 可运行的端到端演示 |
+| `cmd/demo/main.go` | 可运行的端到端演示（结束时导出审计记录供复查） |
+| `cmd/replay/main.go` | 本地复查命令：加载历史版本与审计导出，按版本复现对账 |
 | `gateway/testdata/` | 热更新测试用策略 JSON |
 
 ## 授权规则
@@ -95,6 +97,58 @@
 }
 ```
 
+## 历史版本保留与淘汰
+
+`Store` 在热更新之外保留一段有限的历史版本，供事后按版本复现：
+
+- 每次 `Update` 成功后，被替换下来的版本**深拷贝**进入历史（由旧到新有序），
+  入列后只读，任何后续操作都不会再改动它；
+- 保留上限可配置：`NewStoreWithRetention(initial, n)`（默认
+  `DefaultHistoryRetention = 8`，不含当前在用版本；`n <= 0` 表示不保留历史）；
+- 历史超出上限时**按由旧到新淘汰**；**当前在用版本永远不会被淘汰**；
+- 淘汰只从索引中摘除条目，已发出的快照指针依然完整有效——
+  **淘汰不会打断正在进行的访问判定与复现**；
+- 被淘汰的版本号会留痕（有界队列），查询反馈严格三分：
+  - 当前版本 / 保留期内的历史版本 → `Store.Version(v)` 返回只读快照；
+  - 曾经发布但已被淘汰 → `ErrVersionEvicted`（**绝不拿当前最新版本顶包，
+    也不当作不存在**）；
+  - 从未发布过 → `ErrVersionNotFound`（与淘汰明确区分）。
+- `Store.Versions()` 返回当前可复现的全部版本号（历史由旧到新，当前版本在最后）。
+
+## 历史复现与对账
+
+每条审计记录都带有判定时的**主体属性快照**与请求原文，因此复现的判定输入
+完全来自记录本身，不依赖主体目录的当前状态。
+
+- `Gateway.Replay(rec, version)`：用指定版本（空串表示记录当时生效的版本）
+  重新判定，并与原始记录**逐项对账**——是否放行、拒绝归属、命中规则 ID、
+  判定依据、策略版本（评估时间戳除外）。版本已淘汰/不存在时直接返回
+  `ErrVersionEvicted` / `ErrVersionNotFound`，不产出任何结论。
+- `Gateway.ReplayBatch(recs, version)`：对一批（或 `Logger.RecordsInWindow`
+  筛出的一段时间窗内）已记录访问批量复现。结果顺序与输入一致；判定是纯函数，
+  **同一批输入反复执行，输出内容与顺序必然稳定**，且与逐条复现完全一致。
+  某一条版本不可复现时，该条位置填入明确错误项，不影响其余记录对账。
+- 复现与两条访问入口（按资源取数 / 调用方自带数据）**共用同一套判定引擎、
+  字段处理与审计口径**：同一版本同一输入，从任何入口得到的结论一致；
+  复现结论本身也写入审计留痕。
+- 复核结果中拒绝归属保持四类可区分：未知主体（`unknown_subject`）、
+  主体存在但无任何规则覆盖（`policy_not_found`）、操作不被允许
+  （`action_denied`）、敏感级别不足（`level_insufficient`），互不混淆。
+
+本地命令行复查（无需改代码）：
+
+```bash
+# 1) 运行演示，结束时自动导出 audit-demo.json
+go run ./cmd/demo
+
+# 2) 加载历史版本沿革 + 审计导出，按各记录当时生效的版本复现对账
+go run ./cmd/replay -audit audit-demo.json \
+  -policies gateway/testdata/policy-v1.json,gateway/testdata/policy-v2.json
+
+# 可选：-version 2.0.0 统一指定复现版本（跨版本差异会被逐项列出）；
+#       -seq 3 只复查某一条记录。全部一致退出码 0，否则为 1。
+```
+
 ## 本地验证
 
 ```bash
@@ -109,6 +163,10 @@ go vet ./...
 
 # 端到端演示：正常访问、三类拒绝、未知主体、热更新与兼容拒绝、审计打印
 go run ./cmd/demo
+
+# 本地复查：按记录当时生效的版本复现对账（demo 结束后会提示完整命令）
+go run ./cmd/replay -audit audit-demo.json \
+  -policies gateway/testdata/policy-v1.json,gateway/testdata/policy-v2.json
 ```
 
 测试覆盖场景：
@@ -118,4 +176,11 @@ go run ./cmd/demo
 - 无权字段整体剔除（无键、无空值、无占位符）；两个入口输出一致；
 - 并发热更新期间判定快照自洽；兼容版本接受、不兼容/降级/非法版本拒绝且原策略可用；
 - 旧版本历史判定结论可复现；审计记录包含输入、判定依据、保留/剔除字段，
-  测试日志中打印输入与依据（`go test -v` 可见）。
+  测试日志中打印输入与依据（`go test -v` 可见）；
+- 按版本复现与原始结论逐项一致（含热更新后用旧版本复现、跨版本差异逐项列出）；
+- 批量复现与逐条复现一致，同一批输入反复执行输出内容与顺序稳定；
+- 版本淘汰后复现返回 `ErrVersionEvicted`（与 `ErrVersionNotFound` 可区分，
+  不拿当前版本顶包）；当前版本在 retention=0 时也不可被淘汰；
+- 并发更新（触发淘汰）与并发复现叠加时结果自洽（`-race` 校验）；
+- 复现结果中四类拒绝归属（未知主体 / 无规则覆盖 / 操作被拒 / 级别不足）可区分；
+- 按时间窗筛选记录并批量复现对账。

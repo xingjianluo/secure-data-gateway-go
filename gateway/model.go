@@ -106,10 +106,13 @@ type PolicySet struct {
 }
 
 // AuditRecord 为一条可复现的审计记录，包含输入与判定依据。
+// Subject 快照使复现不依赖当前主体目录状态：记录即全部判定输入。
 type AuditRecord struct {
 	Seq           int64
 	Time          time.Time
 	Request       AccessRequest
+	Subject       Subject // 判定时使用的主体属性快照
+	SubjectKnown  bool    // false 表示未知主体（Subject 为零值）
 	Decision      Decision
 	OutputFields  []string // 实际返回的字段
 	DroppedFields []string // 被整体剔除的字段

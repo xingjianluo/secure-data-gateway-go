@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "min_supported": "1.0.0",
+  "rules": [
+    {"id": "eng-read", "departments": ["engineering"], "actions": ["read"], "min_level": 1, "description": "工程部门只读"},
+    {"id": "sales-read", "departments": ["sales"], "actions": ["read"], "min_level": 0, "description": "销售部门只读"}
+  ],
+  "field_modes": {
+    "1": {"read": "mask"},
+    "2": {"read": "tokenize"},
+    "3": {"read": "drop"}
+  }
+}
