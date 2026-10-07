@@ -28,9 +28,9 @@ func TestReloadPolicyEndToEnd(t *testing.T) {
 	gw, _ := newFixture(t)
 	carolReq := readReq("carol", "cust-1", LevelInternal)
 
-	// v1 下 carol 无策略 -> 拒绝。
-	if _, d, err := gw.AccessRecord(carolReq, customerData()); err == nil || d.Reason != DenyPolicyNotFound {
-		t.Fatalf("v1 下 carol 应 policy_not_found, got %+v %v", d, err)
+	// v1 下 carol 无任何规则覆盖 -> 拒绝（no_matching_rule）。
+	if _, d, err := gw.AccessRecord(carolReq, customerData()); err == nil || d.Reason != DenyNoMatchingRule {
+		t.Fatalf("v1 下 carol 应 no_matching_rule, got %+v %v", d, err)
 	}
 
 	// 热更新 v2。
@@ -78,9 +78,9 @@ func TestReloadIncompatibleFileKeepsOldPolicy(t *testing.T) {
 	if after != before || after.Version != "1.0.0" || len(after.Rules) != 3 {
 		t.Fatalf("拒绝后策略必须原样可用, got version=%s rules=%d", after.Version, len(after.Rules))
 	}
-	// carol 依旧无策略，证明没有部分生效。
+	// carol 依旧无规则覆盖，证明没有部分生效。
 	_, d, err := gw.AccessRecord(readReq("carol", "cust-1", LevelInternal), customerData())
-	if d.Reason != DenyPolicyNotFound {
+	if d.Reason != DenyNoMatchingRule {
 		t.Fatalf("旧策略必须保持判定行为, got %q", d.Reason)
 	}
 }

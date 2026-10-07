@@ -95,7 +95,7 @@ func TestUnknownSubjectDenied(t *testing.T) {
 	}
 }
 
-// ---- 场景二：三类拒绝原因必须彼此可区分，绝不静默放行 ----
+// ---- 场景二：各类拒绝归属必须彼此可区分，绝不静默放行 ----
 
 func TestDenyReasonsAreDistinguishable(t *testing.T) {
 	gw, _ := newFixture(t)
@@ -108,7 +108,7 @@ func TestDenyReasonsAreDistinguishable(t *testing.T) {
 	}{
 		{"操作被拒(alice写)", AccessRequest{SubjectID: "alice", Action: ActionWrite, Resource: Resource{ID: "cust-1", Level: LevelInternal, Fields: customerLevels()}}, DenyActionDenied, ErrAccessDenied},
 		{"级别不足(alice读secret)", readReq("alice", "cust-secret", LevelSecret), DenyLevelInsufficient, ErrAccessDenied},
-		{"策略缺失(carol部门无规则)", readReq("carol", "cust-1", LevelInternal), DenyPolicyNotFound, ErrAccessDenied},
+		{"无规则覆盖(carol部门无规则)", readReq("carol", "cust-1", LevelInternal), DenyNoMatchingRule, ErrAccessDenied},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,23 +134,58 @@ func TestDenyReasonsAreDistinguishable(t *testing.T) {
 		})
 	}
 
-	// 三种拒绝原因互不相等，防止被静默归为同一类。
-	if DenyActionDenied == DenyLevelInsufficient ||
-		DenyActionDenied == DenyPolicyNotFound ||
-		DenyLevelInsufficient == DenyPolicyNotFound ||
-		DenyUnknownSubject == DenyActionDenied {
-		t.Fatal("拒绝原因不得相同")
+	// 资源不存在：归属为 resource_missing（数据问题），
+	// 与任何策略类归属（policy_not_found / no_matching_rule）严格区分。
+	t.Run("资源不存在(不混入策略归属)", func(t *testing.T) {
+		req := readReq("alice", "no-such-resource", LevelInternal)
+		out, d, err := gw.Access(req)
+		t.Logf("输入: subject=%q resource=%q -> allowed=%t reason=%q err=%v",
+			req.SubjectID, req.Resource.ID, d.Allowed, d.Reason, err)
+		if out != nil || d.Allowed {
+			t.Fatalf("资源不存在必须拒绝且无数据输出, allowed=%v out=%v", d.Allowed, out)
+		}
+		if d.Reason != DenyResourceMissing {
+			t.Fatalf("资源不存在应归属 %q, 实得 %q", DenyResourceMissing, d.Reason)
+		}
+		if !errors.Is(err, ErrResourceMissing) {
+			t.Fatalf("错误期望包裹 %v, 实得 %v", ErrResourceMissing, err)
+		}
+		// 资源缺失也必须有审计留痕，且归属与判定一致。
+		recs := gw.Audit().Records()
+		last := recs[len(recs)-1]
+		if last.Decision.Reason != DenyResourceMissing {
+			t.Fatalf("资源缺失的审计归属应为 %q, 实得 %q", DenyResourceMissing, last.Decision.Reason)
+		}
+	})
+
+	// 全部拒绝归属互不相等，防止被静默归为同一类。
+	reasons := []DenyReason{
+		DenyUnknownSubject, DenyPolicyNotFound, DenyNoMatchingRule,
+		DenyResourceMissing, DenyActionDenied, DenyLevelInsufficient,
+	}
+	for i := range reasons {
+		for j := i + 1; j < len(reasons); j++ {
+			if reasons[i] == reasons[j] {
+				t.Fatalf("拒绝归属不得相同: %q", reasons[i])
+			}
+		}
 	}
 }
 
-// ---- 场景三：无策略存储时策略缺失拒绝 ----
+// ---- 场景三：系统里根本没有可用策略时，归属 policy_not_found ----
+// 与“有策略但主体无规则覆盖”（no_matching_rule）严格区分。
 
 func TestNoPolicyAtAll(t *testing.T) {
 	cat := NewCatalog(testSubjects()...)
 	gw := New(cat, NewStore(nil), []byte("k"), nil)
 	_, d, err := gw.AccessRecord(readReq("alice", "cust-1", LevelInternal), customerData())
+	t.Logf("无策略存储: subject=%q -> allowed=%t reason=%q err=%v",
+		"alice", d.Allowed, d.Reason, err)
 	if d.Reason != DenyPolicyNotFound || !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("无策略应 policy_not_found, got %q %v", d.Reason, err)
+	}
+	if d.Reason == DenyNoMatchingRule {
+		t.Fatal("无可用策略不得与无规则覆盖混淆")
 	}
 }
 

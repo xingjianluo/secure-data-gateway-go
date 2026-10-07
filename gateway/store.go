@@ -37,7 +37,8 @@ const DefaultHistoryRetention = 8
 //
 // 历史保留规则：
 //   - 每次成功 Update 后，被替换下来的版本进入历史（由旧到新有序）；
-//   - 历史条数超过 retention 上限时，按由旧到新淘汰；
+//   - 历史条数超过 retention 上限时，按由旧到新淘汰；上限也可在运行期
+//     通过 SetRetention 调整，调低时立即按新上限淘汰；
 //   - 当前在用版本永不淘汰；被淘汰的版本号会短暂留痕，
 //     查询时返回 ErrVersionEvicted 而非 ErrVersionNotFound。
 type Store struct {
@@ -64,6 +65,26 @@ func NewStoreWithRetention(initial *Policy, retention int) *Store {
 		s.current.Store(initial)
 	}
 	return s
+}
+
+// SetRetention 在运行期调整历史版本保留上限（不含当前在用版本），
+// 负数按 0 处理。调低时立即按新上限由旧到新淘汰多余版本，
+// 被淘汰的版本号照常留痕（查询仍返回 ErrVersionEvicted）。
+//
+// 与 Update 一样只从索引中摘除条目：已发出的 *Policy 快照指针不受影响，
+// 因此调整上限不会打断正在进行的访问判定与复核。
+func (s *Store) SetRetention(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retention = n
+	for len(s.history) > s.retention {
+		old := s.history[0]
+		s.history = s.history[1:]
+		s.noteEvictedLocked(old.Version)
+	}
 }
 
 // Snapshot 返回当前策略的只读快照。调用方不得修改返回的策略。

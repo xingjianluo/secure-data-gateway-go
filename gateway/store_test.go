@@ -150,8 +150,8 @@ func TestHistoricalDecisionReproducible(t *testing.T) {
 	history := e.Evaluate(v1, carol, reqCarol)
 	t.Logf("历史判定输入: subject=carol(legal) policy=1.0.0; 依据=%v; 结论 allowed=%t reason=%q",
 		history.MatchedRules, history.Allowed, history.Reason)
-	if history.Allowed || history.Reason != DenyPolicyNotFound || history.PolicyVersion != "1.0.0" {
-		t.Fatalf("v1 历史结论应为 policy_not_found, got %+v", history)
+	if history.Allowed || history.Reason != DenyNoMatchingRule || history.PolicyVersion != "1.0.0" {
+		t.Fatalf("v1 历史结论应为 no_matching_rule, got %+v", history)
 	}
 
 	// 热更新到 v2：legal 部门获得读权限。
@@ -191,6 +191,117 @@ func TestHistoricalDecisionReproducible(t *testing.T) {
 	if d := e.Evaluate(v2, alice, reqAlice); !d.Allowed {
 		t.Fatal("alice v2 应放行")
 	}
+}
+
+// ---- 运行期调整保留上限：立即按新上限淘汰，但不打断进行中的判定与复现 ----
+
+func TestSetRetentionAdjustment(t *testing.T) {
+	s := NewStoreWithRetention(testPolicyV1(), 4)
+	mk := func(ver string) *Policy {
+		return &Policy{
+			Version:      ver,
+			MinSupported: "1.0.0",
+			Rules:        append([]Rule(nil), testPolicyV1().Rules...),
+		}
+	}
+	for _, v := range []string{"2.0.0", "3.0.0", "4.0.0", "5.0.0"} {
+		if err := s.Update(mk(v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 当前=5.0.0，历史=[1.0.0 2.0.0 3.0.0 4.0.0]。
+
+	// 先取一份 2.0.0 的快照持有（模拟正在进行中的复核）。
+	held, err := s.Version("2.0.0")
+	if err != nil {
+		t.Fatalf("调整前 2.0.0 应可取: %v", err)
+	}
+
+	// 调低上限到 1：立即按由旧到新淘汰，只留 4.0.0。
+	s.SetRetention(1)
+	if got := s.Versions(); fmt.Sprint(got) != "[4.0.0 5.0.0]" {
+		t.Fatalf("调低上限后可复现版本应为 [4.0.0 5.0.0], got %v", got)
+	}
+	// 被淘汰的版本明确报“已淘汰”，与“从未发布”区分，绝不顶包。
+	for _, v := range []string{"1.0.0", "2.0.0", "3.0.0"} {
+		if _, err := s.Version(v); !errors.Is(err, ErrVersionEvicted) {
+			t.Fatalf("%s 应为已淘汰, got %v", v, err)
+		}
+	}
+	if _, err := s.Version("9.9.9"); !errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("9.9.9 应为从未发布, got %v", err)
+	}
+
+	// 已持有的快照不受淘汰影响：判定依旧完整自洽。
+	e := NewEngine()
+	alice := Subject{ID: "alice", Department: "engineering", Role: "engineer", Clearance: LevelConfidential}
+	d := e.Evaluate(held, alice, readReq("alice", "cust-1", LevelInternal))
+	if !d.Allowed || d.PolicyVersion != "2.0.0" {
+		t.Fatalf("淘汰不得打断持有快照的判定: %+v", d)
+	}
+	t.Logf("保留上限 4->1: 历史淘汰为 %v, 持有的 2.0.0 快照判定仍完整(allowed=%t)",
+		s.Versions(), d.Allowed)
+
+	// 调高上限后新历史照常累积；当前版本永不淘汰。
+	s.SetRetention(8)
+	if err := s.Update(mk("6.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Versions(); fmt.Sprint(got) != "[4.0.0 5.0.0 6.0.0]" {
+		t.Fatalf("调高上限后历史应继续累积, got %v", got)
+	}
+}
+
+// ---- 调整保留上限与并发复核叠加：结果只允许“一致”或“已淘汰” ----
+
+func TestConcurrentSetRetentionAndReplay(t *testing.T) {
+	gw := newReplayGateway(t, 8)
+	// 记录产生在 v1 时期：调整上限时它的版本会被淘汰，
+	// 复核结果将在“一致”与“已淘汰”两种合法结局间切换。
+	rec := accessAndRecord(t, gw, replayReadReq("alice"))
+	for _, v := range []string{"2.0.0", "3.0.0", "4.0.0"} {
+		if err := gw.PolicyStore().Update(replayPolicy(v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// 复核方：持续按记录版本复现。调整上限淘汰版本时，
+	// 结果只允许“复现成功且一致”或“明确的已淘汰”，不得出现错乱或顶包。
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				res, err := gw.Replay(rec, "")
+				if err != nil {
+					if !errors.Is(err, ErrVersionEvicted) {
+						t.Errorf("并发调整期间出现非淘汰类错误: %v", err)
+						return
+					}
+					continue
+				}
+				if !res.Match {
+					t.Errorf("并发调整期间复现结论不一致: %v", res.Mismatches)
+					return
+				}
+			}
+		}()
+	}
+	// 调整方：反复收紧再放宽保留上限。
+	for i := 0; i < 20; i++ {
+		gw.PolicyStore().SetRetention(i % 3)
+		gw.PolicyStore().SetRetention(8)
+	}
+	close(stop)
+	wg.Wait()
+	t.Logf("并发调整保留上限与复核完成, 最终可复现版本: %v", gw.PolicyStore().Versions())
 }
 
 func safeVer(p *Policy) string {

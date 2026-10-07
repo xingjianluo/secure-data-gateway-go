@@ -61,12 +61,23 @@ type AccessRequest struct {
 }
 
 // DenyReason 区分不同的拒绝原因，禁止静默放行或统一归类。
+// 各类归属两两互斥、可区分，且与入口、是否按版本复核无关：
+// 同一输入同一版本，从任何入口或复核路径得到的归属必须一致。
 type DenyReason string
 
 const (
-	DenyNone              DenyReason = ""                   // 允许
-	DenyUnknownSubject    DenyReason = "unknown_subject"    // 未知主体
-	DenyPolicyNotFound    DenyReason = "policy_not_found"   // 匹配不到任何策略
+	DenyNone           DenyReason = ""                // 允许
+	DenyUnknownSubject DenyReason = "unknown_subject" // 主体目录中不存在该主体
+	// DenyPolicyNotFound 表示判定时系统里根本没有可用策略
+	// （未加载任何策略，或策略内没有任何规则）。
+	// 与“有策略但主体未被任何规则覆盖”严格区分。
+	DenyPolicyNotFound DenyReason = "policy_not_found"
+	// DenyNoMatchingRule 表示系统有可用策略，但没有任何规则的
+	// 主体约束（部门/角色）覆盖到该主体。
+	DenyNoMatchingRule DenyReason = "no_matching_rule"
+	// DenyResourceMissing 表示被访问的资源本身不存在。
+	// 属于数据归属问题，与策略无关，不得混入任何策略类归属。
+	DenyResourceMissing   DenyReason = "resource_missing"
 	DenyLevelInsufficient DenyReason = "level_insufficient" // 主体敏感级别不足
 	DenyActionDenied      DenyReason = "action_denied"      // 操作类型被策略拒绝
 )
