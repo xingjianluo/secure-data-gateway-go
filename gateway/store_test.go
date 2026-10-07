@@ -150,8 +150,8 @@ func TestHistoricalDecisionReproducible(t *testing.T) {
 	history := e.Evaluate(v1, carol, reqCarol)
 	t.Logf("历史判定输入: subject=carol(legal) policy=1.0.0; 依据=%v; 结论 allowed=%t reason=%q",
 		history.MatchedRules, history.Allowed, history.Reason)
-	if history.Allowed || history.Reason != DenyPolicyNotFound || history.PolicyVersion != "1.0.0" {
-		t.Fatalf("v1 历史结论应为 policy_not_found, got %+v", history)
+	if history.Allowed || history.Reason != DenyNoMatchingRule || history.PolicyVersion != "1.0.0" {
+		t.Fatalf("v1 历史结论应为 no_matching_rule, got %+v", history)
 	}
 
 	// 热更新到 v2：legal 部门获得读权限。
@@ -191,6 +191,78 @@ func TestHistoricalDecisionReproducible(t *testing.T) {
 	if d := e.Evaluate(v2, alice, reqAlice); !d.Allowed {
 		t.Fatal("alice v2 应放行")
 	}
+}
+
+// ---- 保留上限调整：淘汰只摘索引，不打断已持有快照的进行中复核 ----
+
+func TestRetentionAdjustmentKeepsInflightSnapshots(t *testing.T) {
+	s := NewStoreWithRetention(testPolicyV1(), 4)
+	for _, v := range []string{"1.1.0", "1.2.0"} {
+		np := testPolicyV1()
+		np.Version = v
+		if err := s.Update(np); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 模拟一笔进行中的复核：先拿到 1.0.0 的完整快照。
+	inflight, err := s.Version("1.0.0")
+	if err != nil {
+		t.Fatalf("调整前应能取到历史版本: %v", err)
+	}
+
+	// 调低保留上限到 0：全部历史版本立即淘汰。
+	s.SetRetention(0)
+	if got := s.Versions(); len(got) != 1 || got[0] != "1.2.0" {
+		t.Fatalf("调整后应只剩当前版本, got %v", got)
+	}
+	// 之后再查 1.0.0：明确的“已淘汰”反馈，而非“从未存在”，也不顶包。
+	if _, err := s.Version("1.0.0"); !errors.Is(err, ErrVersionEvicted) {
+		t.Fatalf("淘汰后应返回 ErrVersionEvicted, got %v", err)
+	}
+
+	// 但进行中复核已持有的快照依然完整有效，判定结论不受淘汰影响。
+	e := NewEngine()
+	alice := Subject{ID: "alice", Department: "engineering", Role: "engineer", Clearance: LevelConfidential}
+	d := e.Evaluate(inflight, alice, readReq("alice", "cust-1", LevelInternal))
+	if !d.Allowed || d.PolicyVersion != "1.0.0" || d.PolicyID != "eng-read" {
+		t.Fatalf("进行中复核持有的快照必须完整可用, got %+v", d)
+	}
+	t.Logf("保留上限调整为 0 后：新查询得到明确淘汰反馈，进行中复核仍落在完整 v1 快照上")
+
+	// 调高上限后新版本正常入列，当前版本永不淘汰。
+	s.SetRetention(2)
+	np := testPolicyV1()
+	np.Version = "1.3.0"
+	if err := s.Update(np); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Versions(); len(got) != 2 || got[1] != "1.3.0" {
+		t.Fatalf("调高上限后历史应正常累积, got %v", got)
+	}
+}
+
+// ---- 发布后调用方修改原策略指针，不得污染已发布版本 ----
+
+func TestPublishedPolicyIsImmutable(t *testing.T) {
+	s := NewStore(testPolicyV1())
+	next := testPolicyV1()
+	next.Version = "2.0.0"
+	if err := s.Update(next); err != nil {
+		t.Fatal(err)
+	}
+	// 调用方事后修改原指针（规则、字段模式）。
+	next.Rules[0].ID = "tampered"
+	next.Rules = append(next.Rules, Rule{ID: "injected"})
+	next.FieldModes[LevelInternal][ActionRead] = FieldDrop
+
+	snap := s.Snapshot()
+	if snap.Rules[0].ID != "eng-read" || len(snap.Rules) != 3 {
+		t.Fatalf("已发布版本被调用方修改污染: %+v", snap.Rules)
+	}
+	if snap.FieldModes[LevelInternal][ActionRead] != FieldMask {
+		t.Fatalf("已发布字段模式被污染: %v", snap.FieldModes[LevelInternal])
+	}
+	t.Logf("发布后调用方篡改原指针，快照保持 rules=%d 首规则=%s", len(snap.Rules), snap.Rules[0].ID)
 }
 
 func safeVer(p *Policy) string {

@@ -22,8 +22,11 @@ type ReplayResult struct {
 // 版本已被淘汰时返回 ErrVersionEvicted、从未发布过时返回 ErrVersionNotFound，
 // 绝不回退到当前版本顶包，也不当作不存在静默跳过。
 //
-// 复现与正常访问共用同一套判定引擎与审计口径：判定输入全部来自审计记录
-// （请求 + 主体快照），不读取当前主体目录；复现结论同样写入审计留痕。
+// 复现与正常访问共用同一套判定引擎与判定口径：判定输入全部来自审计记录
+// （请求 + 主体快照），不读取当前主体目录。
+//
+// 复现是纯函数：不写入审计、不改动任何可观察状态。因此同一批复核请求
+// 反复执行结果完全一致，且复核本身不会污染后续对账的输入（审计记录集）。
 func (g *Gateway) Replay(rec AuditRecord, version string) (ReplayResult, error) {
 	if version == "" {
 		version = rec.Decision.PolicyVersion
@@ -51,14 +54,6 @@ func (g *Gateway) Replay(rec AuditRecord, version string) (ReplayResult, error) 
 	} else {
 		d = g.engine.Evaluate(p, rec.Subject, rec.Request)
 	}
-
-	// 复现也走同一审计口径留痕（不携带输出字段：复现只重放判定）。
-	var sub *Subject
-	if rec.SubjectKnown {
-		s := rec.Subject
-		sub = &s
-	}
-	g.audit.Log(rec.Request, sub, d, nil, nil)
 
 	res := ReplayResult{
 		Seq:      rec.Seq,

@@ -61,12 +61,21 @@ type AccessRequest struct {
 }
 
 // DenyReason 区分不同的拒绝原因，禁止静默放行或统一归类。
+// 五类归属两两互斥、可区分，对账时可据此定位责任：
+//   - unknown_subject：主体目录中查无此人（网关层，与策略无关）；
+//   - resource_not_found：被访问的资源本身不存在（网关层，与策略无关）；
+//   - policy_not_found：当时系统里根本没有可用策略（未加载或策略为空）；
+//   - no_matching_rule：策略存在，但没有任何规则覆盖该主体（部门/角色均不匹配）；
+//   - action_denied：有规则覆盖主体，但均不允许本次操作；
+//   - level_insufficient：操作被允许，但主体敏感级别低于资源/规则要求。
 type DenyReason string
 
 const (
 	DenyNone              DenyReason = ""                   // 允许
 	DenyUnknownSubject    DenyReason = "unknown_subject"    // 未知主体
-	DenyPolicyNotFound    DenyReason = "policy_not_found"   // 匹配不到任何策略
+	DenyResourceMissing   DenyReason = "resource_not_found" // 资源不存在（与策略无关）
+	DenyPolicyNotFound    DenyReason = "policy_not_found"   // 系统无可用策略
+	DenyNoMatchingRule    DenyReason = "no_matching_rule"   // 有策略但无规则覆盖该主体
 	DenyLevelInsufficient DenyReason = "level_insufficient" // 主体敏感级别不足
 	DenyActionDenied      DenyReason = "action_denied"      // 操作类型被策略拒绝
 )

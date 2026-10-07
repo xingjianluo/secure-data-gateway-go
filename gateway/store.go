@@ -66,6 +66,24 @@ func NewStoreWithRetention(initial *Policy, retention int) *Store {
 	return s
 }
 
+// SetRetention 调整历史版本保留上限（不含当前在用版本），负数按 0 处理。
+// 调低时立即按由旧到新淘汰多余版本；被淘汰版本仍按 ErrVersionEvicted 反馈。
+// 只摘除索引中的条目：已发出的 *Policy 快照（进行中的判定与复现所持有的）
+// 依然完整有效，调整不会打断任何进行中的访问判定与复核。
+func (s *Store) SetRetention(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retention = n
+	for len(s.history) > s.retention {
+		old := s.history[0]
+		s.history = s.history[1:]
+		s.noteEvictedLocked(old.Version)
+	}
+}
+
 // Snapshot 返回当前策略的只读快照。调用方不得修改返回的策略。
 // 无策略时返回 nil（判定引擎据此给出 policy_not_found 拒绝）。
 func (s *Store) Snapshot() *Policy {
@@ -91,7 +109,9 @@ func (s *Store) Update(next *Policy) error {
 	if cur != nil {
 		s.pushHistoryLocked(cur)
 	}
-	s.current.Store(next)
+	// 发布前深拷贝：保证已发布版本真正不可变，
+	// 调用方事后修改原指针不会污染进行中的判定与复核。
+	s.current.Store(clonePolicy(next))
 	return nil
 }
 

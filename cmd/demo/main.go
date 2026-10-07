@@ -46,7 +46,7 @@ func main() {
 
 	try("正常访问(alice读, 脱敏+令牌化+剔除)", "alice", gateway.ActionRead)
 	try("操作越权(alice写)", "alice", gateway.ActionWrite)
-	try("策略缺失(carol)", "carol", gateway.ActionRead)
+	try("无规则覆盖(carol, 有策略但无规则匹配其部门)", "carol", gateway.ActionRead)
 	try("未知主体(ghost)", "ghost", gateway.ActionRead)
 
 	fmt.Println("\n===== 在 v1 上尝试加载不兼容的 v3（min_supported=2.0.0，应拒绝并保持原状） =====")

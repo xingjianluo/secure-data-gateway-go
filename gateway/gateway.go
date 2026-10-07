@@ -56,7 +56,9 @@ func (g *Gateway) Access(req AccessRequest) (map[string]any, Decision, error) {
 	rec, ok := g.ds.Get(req.Resource.ID)
 	if !ok {
 		// 资源不存在也经过审计：输入与结论均可追溯。
-		d := Decision{Allowed: false, Reason: DenyPolicyNotFound, EvaluatedAt: nowUTC()}
+		// 归属为 resource_not_found，与任何策略类拒绝（policy_not_found /
+		// no_matching_rule 等）严格分开，对账时不会混入策略责任。
+		d := Decision{Allowed: false, Reason: DenyResourceMissing, EvaluatedAt: nowUTC()}
 		g.audit.Log(req, nil, d, nil, nil)
 		return nil, d, ErrResourceMissing
 	}

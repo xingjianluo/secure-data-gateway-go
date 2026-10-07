@@ -117,11 +117,11 @@ func TestReplayMatchesOriginalDecision(t *testing.T) {
 		}
 	}
 
-	// 显式指定版本：carol 的 v1 记录用 v1 复现仍是 policy_not_found，
+	// 显式指定版本：carol 的 v1 记录用 v1 复现仍是 no_matching_rule，
 	// 用 v2 复现则放行且对账能指出版本差异（不允许混用版本）。
 	res, err := gw.Replay(recNoPolicy, "1.0.0")
-	if err != nil || !res.Match || res.Replayed.Reason != DenyPolicyNotFound {
-		t.Fatalf("v1 复现 carol 应为 policy_not_found 且一致: %+v err=%v", res, err)
+	if err != nil || !res.Match || res.Replayed.Reason != DenyNoMatchingRule {
+		t.Fatalf("v1 复现 carol 应为 no_matching_rule 且一致: %+v err=%v", res, err)
 	}
 	res, err = gw.Replay(recNoPolicy, "2.0.0")
 	if err != nil {
@@ -372,10 +372,20 @@ func TestReplayDenyReasonsDistinguishable(t *testing.T) {
 
 	recs := map[DenyReason]AuditRecord{
 		DenyUnknownSubject:    accessAndRecord(t, gw, replayReadReq("ghost")),
-		DenyPolicyNotFound:    accessAndRecord(t, gw, replayReadReq("carol")),
+		DenyNoMatchingRule:    accessAndRecord(t, gw, replayReadReq("carol")),
 		DenyActionDenied:      accessAndRecord(t, gw, AccessRequest{SubjectID: "alice", Action: ActionDelete, Resource: Resource{ID: "cust-1", Level: LevelInternal}}),
 		DenyLevelInsufficient: accessAndRecord(t, gw, replayReadReq("dave")),
+		DenyResourceMissing:   accessAndRecord(t, gw, AccessRequest{SubjectID: "alice", Action: ActionRead, Resource: Resource{ID: "no-such", Level: LevelInternal}}),
 	}
+	// 系统无可用策略：独立网关（不挂策略），归属为 policy_not_found，
+	// 与“有策略但无规则覆盖”的 no_matching_rule 可区分。
+	gwNoPolicy := New(NewCatalog(
+		Subject{ID: "alice", Department: "engineering", Role: "engineer", Clearance: LevelConfidential},
+	), NewStore(nil), []byte("k"), nil)
+	dsNoPolicy := NewDataSource()
+	dsNoPolicy.Put("cust-1", map[string]any{"name": "x"}, map[string]Level{"name": LevelPublic})
+	gwNoPolicy.UseDataSource(dsNoPolicy)
+	recs[DenyPolicyNotFound] = accessAndRecord(t, gwNoPolicy, replayReadReq("alice"))
 
 	seen := map[DenyReason]bool{}
 	for want, rec := range recs {
@@ -384,8 +394,8 @@ func TestReplayDenyReasonsDistinguishable(t *testing.T) {
 			t.Fatalf("seq=%d 复现失败: %v", rec.Seq, err)
 		}
 		got := res.Replayed.Reason
-		t.Logf("复现 seq=%d 输入 subject=%q action=%s -> 版本=%s reason=%q 依据=%v",
-			rec.Seq, rec.Request.SubjectID, rec.Request.Action,
+		t.Logf("复现 seq=%d 输入 subject=%q action=%s resource=%q -> 版本=%q reason=%q 依据=%v",
+			rec.Seq, rec.Request.SubjectID, rec.Request.Action, rec.Request.Resource.ID,
 			res.Version, got, res.Replayed.MatchedRules)
 		if got != want || !res.Match {
 			t.Fatalf("拒绝归属复现异常: want=%q got=%q match=%t diff=%v",
@@ -393,10 +403,67 @@ func TestReplayDenyReasonsDistinguishable(t *testing.T) {
 		}
 		seen[got] = true
 	}
-	// 四类拒绝两两可区分，不得互相混淆。
-	if len(seen) != 4 {
-		t.Fatalf("四类拒绝归属应全部出现且互不相同, got %v", seen)
+	// 六类拒绝归属两两可区分，不得互相混淆。
+	if len(seen) != 6 {
+		t.Fatalf("六类拒绝归属应全部出现且互不相同, got %v", seen)
 	}
+}
+
+// ---- 复核过程本身不改变可观察状态（纯函数），不影响后续对账 ----
+
+func TestReplayHasNoSideEffects(t *testing.T) {
+	gw := newReplayGateway(t, 8)
+
+	var batch []AuditRecord
+	for _, sub := range []string{"alice", "carol", "ghost"} {
+		batch = append(batch, accessAndRecord(t, gw, replayReadReq(sub)))
+	}
+
+	// 复核前的可观察状态快照。
+	lenBefore := gw.Audit().Len()
+	recsBefore := gw.Audit().Records()
+	windowBefore := gw.Audit().RecordsInWindow(time.Time{}, time.Time{})
+
+	// 反复执行逐条复核与批量复核。
+	for round := 0; round < 3; round++ {
+		for _, rec := range batch {
+			if _, err := gw.Replay(rec, ""); err != nil {
+				t.Fatalf("第 %d 轮 seq=%d 复现失败: %v", round, rec.Seq, err)
+			}
+		}
+		gw.ReplayBatch(batch, "")
+	}
+
+	// 审计条数、记录内容、时间窗查询结果都必须与复核前完全一致：
+	// 复核不得追加记录、不得改动既有记录，否则第二次对账会与第一次对不上。
+	if got := gw.Audit().Len(); got != lenBefore {
+		t.Fatalf("复核改变了审计条数: before=%d after=%d", lenBefore, got)
+	}
+	recsAfter := gw.Audit().Records()
+	if len(recsAfter) != len(recsBefore) {
+		t.Fatalf("复核改变了审计记录集: before=%d after=%d", len(recsBefore), len(recsAfter))
+	}
+	for i := range recsBefore {
+		if recsAfter[i].Seq != recsBefore[i].Seq ||
+			len(CompareDecisions(recsBefore[i].Decision, recsAfter[i].Decision)) != 0 {
+			t.Fatalf("第 %d 条审计记录被复核改动:\nbefore=%+v\nafter=%+v",
+				i, recsBefore[i], recsAfter[i])
+		}
+	}
+	windowAfter := gw.Audit().RecordsInWindow(time.Time{}, time.Time{})
+	if len(windowAfter) != len(windowBefore) {
+		t.Fatalf("复核改变了时间窗查询结果: before=%d after=%d", len(windowBefore), len(windowAfter))
+	}
+
+	// 复核之后再次对同一批记录对账，结论与第一轮一致（用第一轮结果作基准）。
+	base := gw.ReplayBatch(batch, "")
+	again := gw.ReplayBatch(batch, "")
+	for i := range base {
+		if !sameReplayResult(base[i], again[i]) {
+			t.Fatalf("复核后第 %d 条对账结果漂移:\nbase=%+v\nagain=%+v", i, base[i], again[i])
+		}
+	}
+	t.Logf("3 轮逐条+批量复核后审计状态未变（%d 条），对账结果稳定", lenBefore)
 }
 
 // ---- 按时间窗批量复现 ----
